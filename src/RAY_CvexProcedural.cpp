@@ -1,16 +1,17 @@
 //
 // Created by symek on 8/8/20.
 //
-
+#include <iostream>
 #include <UT/UT_DSOVersion.h>
 #include <GU/GU_Detail.h>
 #include <RAY/RAY_ProceduralFactory.h>
+#include <CVEX/CVEX_Context.h>
 #include "RAY_CvexProcedural.hpp"
 
-using namespace HDK_Sample;
+using namespace HA_SKK;
 static RAY_ProceduralArg        theArgs[] = {
         RAY_ProceduralArg("file",           "string",       ""),
-        RAY_ProceduralArg("blurfile",       "string",       ""),
+        RAY_ProceduralArg("vexfile",       "string",       ""),
         RAY_ProceduralArg("velocityblur",   "int",          "0"),
         RAY_ProceduralArg("shutter",        "real",         "1"),
         RAY_ProceduralArg()
@@ -19,10 +20,10 @@ class ProcDef : public RAY_ProceduralFactory::ProcDefinition
 {
 public:
     ProcDef()
-            : RAY_ProceduralFactory::ProcDefinition("demofile")
+            : RAY_ProceduralFactory::ProcDefinition("cvexprocedural")
     {
     }
-    virtual RAY_Procedural      *create() const { return new RAY_DemoFile(); }
+    virtual RAY_Procedural      *create() const { return new RAY_CVexProcedural(); }
     virtual RAY_ProceduralArg   *arguments() const { return theArgs; }
 };
 void
@@ -30,23 +31,23 @@ registerProcedural(RAY_ProceduralFactory *factory)
 {
     factory->insert(new ProcDef);
 }
-RAY_DemoFile::RAY_DemoFile()
+RAY_CVexProcedural::RAY_CVexProcedural()
         : myShutter(1),
           myPreBlur(0),
           myPostBlur(0)
 {
     myBox.initBounds(0, 0, 0);
 }
-RAY_DemoFile::~RAY_DemoFile()
+RAY_CVexProcedural::~RAY_CVexProcedural()
 {
 }
 const char *
-RAY_DemoFile::className() const
+RAY_CVexProcedural::className() const
 {
-    return "RAY_DemoFile";
+    return "RAY_CVexProcedural";
 }
 int
-RAY_DemoFile::initialize(const UT_BoundingBox *box)
+RAY_CVexProcedural::initialize(const UT_BoundingBox *box)
 {
     int         ival;
     // The user is required to specify the bounds of the geometry.
@@ -72,7 +73,8 @@ RAY_DemoFile::initialize(const UT_BoundingBox *box)
         myVelocityBlur = false;
     // Import the filenames for t0 and t1
     import("file", myFile);
-    import("blurfile", myBlurFile);
+    import("vexfile", myVexFile);
+
     // Import the shutter settings for velocity blur. The 'camera:shutter'
     // stores the start and end of the shutter window in fraction of
     // a frame. Divide by the current FPS value to get the correct
@@ -85,12 +87,12 @@ RAY_DemoFile::initialize(const UT_BoundingBox *box)
     return 1;
 }
 void
-RAY_DemoFile::getBoundingBox(UT_BoundingBox &box)
+RAY_CVexProcedural::getBoundingBox(UT_BoundingBox &box)
 {
     box = myBox;
 }
 void
-RAY_DemoFile::render()
+RAY_CVexProcedural::render()
 {
     // Allocate geometry.
     // Warning:  When allocating geometry for a procedural, do not simply
@@ -103,6 +105,44 @@ RAY_DemoFile::render()
                 myFile.c_str());
         return;
     }
+    // Run Cvex on that...
+    CVEX_Context cvex;
+    CVEX_Value *P_in, *P_out;
+    cvex.addInput("P", CVEX_TYPE_VECTOR3, true);
+    const char * argv[] = {myVexFile.c_str()};
+
+    if (!cvex.load(1, argv)) {
+        std::cerr << "Can't load VEX file\n";
+    } else {
+        std::cout << "Loading CVEX file " << myVexFile << "\n";
+    }
+
+    P_in = cvex.findInput("P", CVEX_TYPE_VECTOR3);
+
+    // Set the values for "P"
+    auto handle = g0.handle();
+    const auto point_range = handle.gdp()->getPointRange();
+    UT_Vector3FArray positions;
+    if (P_in)
+    {
+        handle.gdp()->getPos3AsArray(point_range, positions);
+        P_in->setTypedData(positions.data(), handle.gdp()->getNumPoints());  // "bind" the buffer to the variable
+    }
+
+    P_out = cvex.findOutput("P", CVEX_TYPE_VECTOR3);
+    if(P_out) {
+        P_out->setTypedData(positions.data(), handle.gdp()->getNumPoints());
+    }
+
+    if (!cvex.run(handle.gdp()->getNumPoints(), false)) {
+        std::cerr << cvex.getLastError() << "\n";
+        std::cerr << cvex.getVexErrors() << "\n";
+    }
+
+    handle.gdpNC()->setPos3FromArray(point_range, positions);
+
+    handle.gdp()->computeQuickBounds(myBox);
+
     // Add geometry to mantra.
     if (myVelocityBlur)
     {
@@ -112,17 +152,17 @@ RAY_DemoFile::render()
     else
     {
         // Otherwise, we check to see if there's a motion blur geometry file
-        if (myBlurFile.isstring())
-        {
-            auto        g1 = g0.appendSegmentGeometry(myShutter);
-            GU_DetailHandleAutoWriteLock        wlock(g1);
-            if (!wlock.getGdp()->load(myBlurFile, 0).success())
-            {
-                fprintf(stderr, "Unable to load geometry[1]: '%s'\n",
-                        myBlurFile.c_str());
-                g0.removeSegmentGeometry(g1);
-            }
-        }
+//        if (myBlurFile.isstring())
+//        {
+//            auto        g1 = g0.appendSegmentGeometry(myShutter);
+//            GU_DetailHandleAutoWriteLock        wlock(g1);
+//            if (!wlock.getGdp()->load(myBlurFile, 0).success())
+//            {
+//                fprintf(stderr, "Unable to load geometry[1]: '%s'\n",
+//                        myBlurFile.c_str());
+//                g0.removeSegmentGeometry(g1);
+//            }
+//        }
     }
     RAY_ProceduralChildPtr      obj = createChild();
     obj->addGeometry(g0);

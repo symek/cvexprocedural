@@ -1,0 +1,5 @@
+cvex
+test_noise(export vector P=0) {
+    P += (xnoise(P*2.345678)-0.5);
+
+}
